@@ -71,8 +71,26 @@ function testApi() {
 
 // ───────────────────────────── Веб-приложение ─────────────────────────────
 
-function doGet() {
+function doGet(e) {
+  // Разовый перенос старых видео в карточки — можно запустить без ключа ровно один раз (?run=migrate-videos).
+  // Перенос ничего не удаляет и карточки не дублирует; после первого запуска адрес ничего не делает.
+  if (e && e.parameter && e.parameter.run === 'migrate-videos') return json_(runOnce_('VIDEO_MIGRATED', migrateVideos));
   return json_({ ok: true, app: APP.NAME, hint: 'API работает. Приложение обращается сюда POST-запросами.' });
+}
+
+function runOnce_(key, fn) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty(key)) return { ok: true, skipped: true, doneAt: props.getProperty(key) };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return { ok: false, error: 'Сейчас идёт ревизия, попробуйте через пару минут' };
+  try {
+    if (props.getProperty(key)) return { ok: true, skipped: true, doneAt: props.getProperty(key) };
+    const log = fn();
+    props.setProperty(key, new Date().toISOString());
+    return { ok: true, log };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function doPost(e) {

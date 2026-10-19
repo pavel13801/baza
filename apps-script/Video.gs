@@ -46,6 +46,7 @@ function migrateVideos() {
   });
 
   const log = [];
+  adoptOrphanCards_(log);
   Object.keys(groups).forEach(vid => {
     const docs = groups[vid];
     const real = docs.filter(d => d.real).sort((a, b) => b.text.length - a.text.length);
@@ -71,7 +72,29 @@ function migrateVideos() {
 
 // ───────────────────────────── Карточки ─────────────────────────────
 
-function videoFolder_() { return sub_(root_(), VIDEO.FOLDER); }
+let videoFolderCache_ = null;
+
+/**
+ * Папка «Видео». Её ID запоминается: только что созданную папку Диск находит по имени не сразу,
+ * и без этого за один запуск могла появиться вторая папка. Если папок «Видео» несколько — берётся та, где есть файлы.
+ */
+function videoFolder_() {
+  if (videoFolderCache_) return videoFolderCache_;
+  const props = PropertiesService.getScriptProperties();
+  const saved = props.getProperty('VIDEO_FOLDER_ID');
+  if (saved) {
+    try {
+      const f = DriveApp.getFolderById(saved);
+      if (!f.isTrashed()) return (videoFolderCache_ = f);
+    } catch (e) {}
+  }
+  const found = [];
+  const it = root_().getFoldersByName(VIDEO.FOLDER);
+  while (it.hasNext()) found.push(it.next());
+  const folder = found.find(f => f.getFiles().hasNext()) || found[0] || root_().createFolder(VIDEO.FOLDER);
+  props.setProperty('VIDEO_FOLDER_ID', folder.getId());
+  return (videoFolderCache_ = folder);
+}
 
 function watchUrl_(id) { return 'https://www.youtube.com/watch?v=' + id; }
 
@@ -94,17 +117,18 @@ function ensureVideo_(url, opts) {
     '\n\n_Карточка готовится: транскрипт и конспект появятся через пару минут._' +
     '\n\n## Мой комментарий\n\n' + (opts.comment || 'Пока нет.');
   const docId = importMarkdown_(cleanTitle_(info.title), md, videoFolder_());
-  setCardProps_(docId, {
+  const props = {
     videoId: id,
     url: watchUrl_(id),
     status: 'new',
     state: opts.transcriptId ? 'summarizing' : 'queued',
     stage: opts.transcriptId ? 'конспект' : 'в очереди',
-    transcriptId: opts.transcriptId || null,
     channel: info.author || '',
     seconds: info.seconds ? String(info.seconds) : '',
     added: new Date().toISOString(),
-  });
+  };
+  if (opts.transcriptId) props.transcriptId = opts.transcriptId;
+  setCardProps_(docId, props);
   return findCardById_(docId);
 }
 
@@ -168,7 +192,33 @@ function cardInfo_(f) {
 function setCardProps_(id, props) {
   const out = {};
   Object.keys(props).forEach(k => { out[k] = props[k] == null ? null : fitProp_(k, String(props[k])); });
-  Drive.Files.update({ properties: out }, id);
+  try {
+    Drive.Files.update({ properties: out }, id, null, { fields: 'id' });
+  } catch (e) {
+    // Диск иногда сохраняет изменения, но падает на ответе: «The operation was successful, but there was an error preparing the response»
+    if (!/operation was successful/i.test(e.message)) throw e;
+  }
+}
+
+/** Карточки, у которых не записались свойства (сбой Диска), — находит видео по ссылке в тексте и дописывает свойства. */
+function adoptOrphanCards_(log) {
+  listCards_().filter(c => !c.videoId).forEach(c => {
+    const text = DocumentApp.openById(c.id).getBody().getText();
+    const vid = ytId_((text.match(YT_RE) || [''])[0]);
+    if (!vid) return;
+    const other = findCard_(vid);
+    if (other && other.id !== c.id) {
+      DriveApp.getFileById(c.id).moveTo(sub_(sub_(root_(), CONFIG.SERVICE), VIDEO.ARCHIVE));
+      log.push('Лишняя карточка — в архив: ' + c.title);
+      return;
+    }
+    const channel = (text.match(/Канал:\s*([^\n]+)/) || [])[1] || '';
+    setCardProps_(c.id, {
+      videoId: vid, url: watchUrl_(vid), status: 'new', state: 'queued', stage: 'в очереди',
+      channel: channel.trim(), added: c.created || new Date().toISOString(),
+    });
+    log.push('Карточка восстановлена: ' + c.title);
+  });
 }
 
 function fitProp_(key, val) {

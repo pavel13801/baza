@@ -1,0 +1,7 @@
+{
+  "scriptId": "1mVUNyHN5IfIP_MsXCyT9RNeuow21C18ZyabDCtkIleiIU-X0JWd86AtJ",
+  "rootDir": "apps-script",
+  "scriptExtensions": [".gs"],
+  "jsonExtensions": [".json"],
+  "filePushOrder": ["apps-script/Code.gs", "apps-script/Video.gs", "apps-script/Api.gs"]
+}

@@ -1,6 +1,6 @@
 ﻿'use strict';
 (function () {
-  const VERSION = '1.1.1';
+  const VERSION = '1.1.2';
   const esc = MD.esc;
   const $ = (s, el) => (el || document).querySelector(s);
   const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
@@ -1386,7 +1386,18 @@
       setSync('', 'Не подключено');
     }
     // на localhost офлайн-кэш не нужен: при разработке он показывал бы старую версию файлов
-    if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+    if ('serviceWorker' in navigator && location.protocol === 'https:') {
+      // пришла новая версия приложения — перезагрузиться, чтобы сразу её показать (кроме записи голоса)
+      const hadController = !!navigator.serviceWorker.controller;
+      let reloaded = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloaded) return;
+        if (Rec.rec) { toast('Вышла новая версия — перезапустите приложение после записи', 5000); return; }
+        reloaded = true;
+        location.reload();
+      });
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   })();
 })();

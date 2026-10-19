@@ -341,15 +341,26 @@ function transcribeYouTube_(url, started) {
   // запас ~90 секунд на один запрос к Gemini, чтобы не упереться в 6-минутный лимит Apps Script
   while (!st.done && Date.now() - started < CONFIG.TIME_BUDGET_MS - 90 * 1000) {
     const end = Math.min(st.next + CONFIG.TRANSCRIPT_CHUNK_SEC, limit);
-    const text = callGeminiRaw_(TRANSCRIBE_SYSTEM, [
-      { fileData: { fileUri: 'https://www.youtube.com/watch?v=' + id }, videoMetadata: { startOffset: st.next + 's', endOffset: end + 's' } },
-      { text: 'Фрагмент с ' + fmtTime_(st.next) + ' по ' + fmtTime_(end) + '.' },
-    ], { mediaResolution: 'MEDIA_RESOLUTION_LOW', maxOutputTokens: 32768, temperature: 0 }, model).trim();
+    let text;
+    try {
+      text = callGeminiRaw_(TRANSCRIBE_SYSTEM, [
+        { fileData: { fileUri: 'https://www.youtube.com/watch?v=' + id }, videoMetadata: { startOffset: st.next + 's', endOffset: end + 's' } },
+        { text: 'Фрагмент с ' + fmtTime_(st.next) + ' по ' + fmtTime_(end) + '.' },
+      ], { mediaResolution: 'MEDIA_RESOLUTION_LOW', maxOutputTokens: 32768, temperature: 0 }, model).trim();
+    } catch (e) {
+      // длина видео неизвестна, и кусок начинается за его концом — Gemini отвечает ошибкой: видео кончилось
+      if (st.next > 0 && !st.seconds && /Gemini 400/.test(e.message)) { st.done = true; break; }
+      throw e;
+    }
     if (text) appendParagraphs_(st.docId, text);
     st.next = end;
-    st.done = end >= limit || (!st.seconds && text.length < 30);
+    // длина неизвестна (YouTube не отдал её скрипту): видео кончилось, если речь оборвалась задолго до конца куска
+    const stamps = text.match(/\[\d{1,2}:\d{2}(?::\d{2})?\]/g) || [];
+    const lastSec = stamps.length ? parseT_(stamps[stamps.length - 1]) : 0;
+    st.done = end >= limit || (!st.seconds && (text.length < 30 || lastSec < end - 120));
     props.setProperty(key, JSON.stringify(st));
   }
+  if (st.done) props.setProperty(key, JSON.stringify(st));
   return st;
 }
 

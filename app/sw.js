@@ -1,6 +1,6 @@
-// Офлайн-оболочка приложения. Данные базы кэширует само приложение (IndexedDB), здесь — только файлы сайта.
+﻿// Офлайн-оболочка приложения. Данные базы кэширует само приложение (IndexedDB), здесь — только файлы сайта.
 // При выпуске новой версии поменяйте VERSION, чтобы телефоны подтянули обновление.
-const VERSION = 'baza-1.1.0';
+const VERSION = 'baza-1.1.1';
 const SHELL = [
   './', 'index.html', 'styles.css', 'app.js', 'md.js', 'demo.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',

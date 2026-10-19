@@ -249,13 +249,19 @@ function scheduleVideoQueue_(delayMs) {
   ScriptApp.newTrigger('processVideoQueue').timeBased().after(delayMs || 5000).create();
 }
 
-/** Фоновая обработка карточек. Сама переназначает себя, пока есть незаконченные. */
-function processVideoQueue() {
+function clearVideoQueue_() {
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'processVideoQueue')
     .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+/** Фоновая обработка карточек. Сама переназначает себя, пока есть незаконченные. */
+function processVideoQueue() {
+  clearVideoQueue_();
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) { scheduleVideoQueue_(2 * 60 * 1000); return; } // идёт ревизия — позже
+  // Страховка: если запуск упадёт или его оборвёт 6-минутный лимит Apps Script, очередь всё равно продолжится
+  scheduleVideoQueue_(8 * 60 * 1000);
   const started = Date.now();
   let left = false;
   try {
@@ -266,10 +272,35 @@ function processVideoQueue() {
       if (Date.now() - started > CONFIG.TIME_BUDGET_MS - 60 * 1000) { left = true; break; }
       if (!processVideo_(card, started)) left = true;
     }
+  } catch (e) {
+    left = true;
+    videoLog_('Сбой очереди: ' + e.message);
   } finally {
     lock.releaseLock();
   }
+  clearVideoQueue_();
   if (left) scheduleVideoQueue_(60 * 1000);
+}
+
+/** «Служебное/Журнал видео»: что сделала очередь карточек — готовые карточки и ошибки. */
+function videoLog_(line) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    let doc = null;
+    const id = props.getProperty('VIDEO_LOG_ID');
+    if (id) { try { doc = DocumentApp.openById(id); } catch (e) {} }
+    if (!doc) {
+      const newId = importMarkdown_('Журнал видео',
+        '# Журнал видео\n\nЧто делала фоновая очередь карточек видео: готовые карточки и ошибки. Новые записи — внизу.',
+        sub_(root_(), CONFIG.SERVICE));
+      props.setProperty('VIDEO_LOG_ID', newId);
+      doc = DocumentApp.openById(newId);
+    }
+    doc.getBody().appendParagraph(Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'dd.MM HH:mm') + ' — ' + line);
+    doc.saveAndClose();
+  } catch (e) {
+    console.error('Журнал видео: ' + e.message);
+  }
 }
 
 /** Один шаг обработки карточки. true — карточка готова, false — продолжим в следующий запуск. */
@@ -290,17 +321,24 @@ function processVideo_(card, started) {
       setCardProps_(card.id, { state: 'summarizing' });
     }
     if (Date.now() - started > CONFIG.TIME_BUDGET_MS - VIDEO.SUMMARY_RESERVE_MS) return false;
+    setCardProps_(card.id, { stage: 'конспект' });
     buildCard_(card);
     setCardProps_(card.id, { state: 'done', stage: null, err: null, tries: null });
+    videoLog_('Готова карточка: ' + card.title + (card.method ? ' (' + card.method + ')' : ''));
     return true;
   } catch (e) {
     const tries = card.tries + 1;
     card.tries = tries;
-    setCardProps_(card.id, {
-      tries: String(tries),
-      err: e.message.slice(0, 50),
-      state: tries >= VIDEO.MAX_TRIES ? 'error' : card.state === 'queued' ? 'transcribing' : card.state,
-    });
+    videoLog_('Ошибка (попытка ' + tries + ' из ' + VIDEO.MAX_TRIES + '): ' + card.title + ' — ' + e.message.slice(0, 300));
+    try {
+      setCardProps_(card.id, {
+        tries: String(tries),
+        err: e.message.slice(0, 50),
+        state: tries >= VIDEO.MAX_TRIES ? 'error' : card.state === 'queued' ? 'transcribing' : card.state,
+      });
+    } catch (e2) {
+      videoLog_('Не удалось записать ошибку в карточку: ' + e2.message);
+    }
     console.error('Карточка ' + card.title + ': ' + (e.stack || e.message));
     return false;
   }

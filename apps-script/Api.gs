@@ -75,6 +75,8 @@ function doGet(e) {
   // Разовый перенос старых видео в карточки — можно запустить без ключа ровно один раз (?run=migrate-videos).
   // Перенос ничего не удаляет и карточки не дублирует; после первого запуска адрес ничего не делает.
   if (e && e.parameter && e.parameter.run === 'migrate-videos') return json_(runOnce_('VIDEO_MIGRATED', migrateVideos));
+  // Подтолкнуть очередь карточек: обрабатывает только уже заведённые карточки, повторный вызов ничего не дублирует
+  if (e && e.parameter && e.parameter.run === 'video-queue') { scheduleVideoQueue_(1000); return json_({ ok: true, scheduled: true }); }
   return json_({ ok: true, app: APP.NAME, hint: 'API работает. Приложение обращается сюда POST-запросами.' });
 }
 

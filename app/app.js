@@ -1,6 +1,6 @@
-'use strict';
+﻿'use strict';
 (function () {
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const esc = MD.esc;
   const $ = (s, el) => (el || document).querySelector(s);
   const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
@@ -801,6 +801,20 @@
     }
   }
 
+  /**
+   * Пункты раздела превращаются в чек-лист. Google Документ при экспорте в Markdown теряет «[ ]»,
+   * поэтому список «Что применить» приходит обычным — здесь ему возвращаются галочки.
+   */
+  function checklistSection(md, heading) {
+    let inside = false;
+    return String(md).split('\n').map(line => {
+      const h = line.match(/^(#{1,6})\s+(.*?)\s*$/);
+      if (h) { inside = h[2].replace(/[\\*_]/g, '').trim() === heading; return line; }
+      if (inside && !/^\s*([-*+]|\d+[.)])\s+\\?\[[ xX]\\?\]/.test(line)) return line.replace(/^(\s*)(?:[-*+]|\d+[.)])\s+/, '$1- [ ] ');
+      return line;
+    }).join('\n');
+  }
+
   /** «[12:34]» и «**0:02**» в тексте → ссылки на нужный момент видео. */
   function linkTimestamps(md, vid) {
     const link = t => '[' + t + '](https://www.youtube.com/watch?v=' + vid + '&t=' + tsToSec(t) + 's)';
@@ -982,6 +996,7 @@
     let md = MD.stripTitle(p.markdown, p.title);
     // канал, длительность, тип и темы карточки уже показаны над плеером — в тексте их не дублируем
     if (v.type === 'video' && /^#{1,3}\s/m.test(md)) md = md.replace(/^[\s\S]*?(?=^#{1,3}\s)/m, '');
+    if (v.type === 'video') md = checklistSection(md, 'Что применить');
     if (v.videoId) md = linkTimestamps(md, v.videoId);
     $('#doc').innerHTML = MD.render(md) || '<p class="muted">Пустая страница</p>';
     if (v.type === 'video') applyChecks(v);

@@ -1,6 +1,6 @@
 ﻿'use strict';
 (function () {
-  const VERSION = '1.1.2';
+  const VERSION = '1.1.3';
   const esc = MD.esc;
   const $ = (s, el) => (el || document).querySelector(s);
   const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
@@ -1186,6 +1186,8 @@
 
         '<h2 class="section">Действия</h2>' +
         '<ul class="list">' +
+          '<li><button class="row has-icon" data-act="app-update"><span class="ico">⬆️</span><span class="body">' +
+            '<span class="t">Обновить приложение</span><span class="s" id="updInfo">установлена версия ' + VERSION + '</span></span>' + I.chev + '</button></li>' +
           row({ act: 'revise', icon: '🧹', title: 'Разобрать «Входящие» сейчас', sub: 'не дожидаясь ревизии в 9:00' }) +
           row({ act: 'refresh', icon: '🔄', title: 'Обновить базу с Диска' }) +
           row({ act: 'migrate', icon: '🎞️', title: 'Сделать карточки для старых видео', sub: 'для роликов, сохранённых до карточек; повторно не дублирует' }) +
@@ -1214,6 +1216,14 @@
       after() {
         $('#setInterval').addEventListener('change', e => { st.interval = +e.target.value; saveSettings(); });
         $('#setDemo').addEventListener('change', e => setDemo(e.target.checked));
+        serverVersion().then(v => {
+          const el = $('#updInfo');
+          if (!el || !v) return;
+          el.textContent = v === VERSION
+            ? 'установлена версия ' + VERSION + ' — последняя'
+            : 'установлена ' + VERSION + ', доступна ' + v + ' — нажмите, чтобы обновить';
+          if (v !== VERSION) el.style.color = 'var(--accent)';
+        });
       },
     };
   }
@@ -1325,6 +1335,10 @@
       case 'vstatus': setVideoStatus(d.v); break;
       case 'vretry': retryVideo(); break;
       case 'migrate': migrateVideos(); break;
+      case 'app-update':
+        if (Rec.rec) { toast('Сначала закончите запись'); break; }
+        forceUpdate();
+        break;
       case 'ask': ask(d.q); break;
       case 'ask-page': {
         const v = top();
@@ -1362,8 +1376,52 @@
 
   window.addEventListener('online', () => { flushOutbox(); refreshTree(true); renderRecent(); });
   window.addEventListener('offline', () => { setSync('offline', 'Нет сети'); renderRecent(); });
+  // ───────────────────────────── Обновление приложения ─────────────────────────────
+  // На iPhone приложение с экрана «Домой» держится за старые файлы — поэтому версия сверяется с сервером
+  // (version.json), а «Обновить приложение» сбрасывает офлайн-кэш и грузит всё заново.
+  // Заметки, очередь отправки и настройки лежат отдельно (localStorage, IndexedDB) и не трогаются.
+
+  async function serverVersion() {
+    if (location.protocol !== 'https:' || !navigator.onLine) return null;
+    try {
+      const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+      return r.ok ? ((await r.json()).version || null) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function forceUpdate() {
+    toast('Обновляю приложение…', 8000);
+    try {
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.unregister()));
+      }
+      if (window.caches) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      }
+    } catch (e) {}
+    // новый адрес страницы — чтобы и сама страница не взялась из кэша браузера
+    location.replace(location.pathname + '?v=' + Date.now());
+  }
+
+  // Вышла новая версия — обновиться самому, один раз на каждую версию (чтобы не зациклиться)
+  let lastVersionCheck = 0;
+  async function autoUpdate() {
+    if (Date.now() - lastVersionCheck < 10 * 60000) return;
+    lastVersionCheck = Date.now();
+    const v = await serverVersion();
+    if (!v || v === VERSION || Rec.rec) return;
+    if (LS.get('autoUpdatedTo', '') === v) return;
+    LS.set('autoUpdatedTo', v);
+    forceUpdate();
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
+    autoUpdate();
     flushOutbox();
     if (Date.now() - S.treeAt > 5 * 60000) refreshTree(true);
   });
@@ -1378,6 +1436,9 @@
     if (cached && cached.tree && !!cached.demo === !!S.settings.demo) { S.tree = cached.tree; S.treeAt = cached.at || 0; }
     await loadOutbox();
     render();
+    autoUpdate();
+    // адрес с ?v=… после обновления больше не нужен
+    if (/[?&]v=\d+/.test(location.search)) history.replaceState(null, '', location.pathname);
     if (configured()) {
       if (!navigator.onLine) setSync('offline', 'Нет сети — показана сохранённая копия');
       refreshTree(true);

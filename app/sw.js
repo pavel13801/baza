@@ -1,6 +1,6 @@
 ﻿// Офлайн-оболочка приложения. Данные базы кэширует само приложение (IndexedDB), здесь — только файлы сайта.
 // Есть сеть — файлы всегда свежие с сервера; нет сети — из кэша. Так новая версия видна с первого открытия.
-const VERSION = 'baza-1.1.2';
+const VERSION = 'baza-1.1.3';
 const SHELL = [
   './', 'index.html', 'styles.css', 'app.js', 'md.js', 'demo.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
@@ -28,7 +28,9 @@ self.addEventListener('activate', e => {
 // Чужие запросы (Apps Script, YouTube) не трогаем.
 self.addEventListener('fetch', e => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+  if (url.pathname.endsWith('/version.json')) return; // проверка обновлений — всегда напрямую с сервера
   const key = req.mode === 'navigate' ? 'index.html' : req;
   e.respondWith(
     caches.open(VERSION).then(async cache => {

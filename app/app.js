@@ -1,6 +1,6 @@
 'use strict';
 (function () {
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const esc = MD.esc;
   const $ = (s, el) => (el || document).querySelector(s);
   const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
@@ -267,6 +267,11 @@
     } else if (!v && S.tab === 'videos') render();
     else if (!v && S.tab === 'chat' && !S.chat.length) render();
     else if (v && (v.type === 'topic' || v.type === 'list')) render();
+    else if (v && v.type === 'video') {
+      const c = findVideo(v.id);
+      if (c && c.state !== v.lastState) render(); // карточка дозрела — показать конспект
+    }
+    watchProcessing();
   }
 
   // ───────────────────────────── Очередь отправки ─────────────────────────────
@@ -341,7 +346,9 @@
       renderRecent();
     }
     if (sent) {
-      toast(sent === 1 ? 'Сохранено во «Входящие»' : 'Сохранено во «Входящие»: ' + sent);
+      const video = S.outbox.find(i => i.status === 'done' && i.sent > Date.now() - 60000 && i.result && i.result.cardId);
+      if (video) toast('Видео сохранено — карточка с конспектом будет готова через 1–3 минуты', 4500);
+      else toast(sent === 1 ? 'Сохранено во «Входящие»' : 'Сохранено во «Входящие»: ' + sent);
       setTimeout(() => refreshTree(true), 1200);
     }
   }
@@ -583,7 +590,8 @@
     });
     t.general.forEach(p => items.push({ kind: 'page', title: p.title, p, sub: 'Знания' }));
     t.thoughts.forEach(p => items.push({ kind: 'page', title: p.title, p, sub: 'Мысли и идеи', icon: '💡' }));
-    t.videos.forEach(v => items.push({ kind: 'video', title: v.title, v, sub: v.videoId ? 'Видео' : 'Клиппинг' }));
+    videos().forEach(v => items.push({ kind: 'video', title: v.title + ' ' + (v.channel || ''), v }));
+    (t.clips || []).forEach(p => items.push({ kind: 'page', title: p.title, p, sub: 'Клиппинг', icon: '📰' }));
     t.notes.forEach(p => items.push({ kind: 'page', title: p.title, p, sub: 'Мои заметки', icon: '✏️' }));
     t.inbox.forEach(p => items.push({ kind: 'inbox', title: p.title, p, sub: 'Входящие — ждёт разбора', icon: '📥' }));
     return items;
@@ -627,7 +635,7 @@
       : '<div class="card empty">Тем пока нет — они появятся после первой ревизии.</div>';
     if (t.general.length) h += '<div style="margin-top:10px"></div><ul class="list">' + t.general.map(p => pageRow(p, 'Знания · ' + when(p.modified), '📖')).join('') + '</ul>';
     h += '<h2 class="section">Источники</h2><ul class="list">' +
-      row({ act: 'tab', data: { tab: 'videos' }, icon: '▶️', title: 'Видео и статьи', badge: t.videos.length }) + '</ul>';
+      row({ act: 'tab', data: { tab: 'videos' }, icon: '▶️', title: 'Видео и статьи', sub: 'конспекты с таймкодами, что применить', badge: videos().length + (t.clips || []).length }) + '</ul>';
     h += '<h2 class="section">Служебное</h2><ul class="list">' +
       (t.mainId ? pageRow({ id: t.mainId, title: 'Главная' }, 'оглавление базы', '🏠') : '') +
       (t.rulesId ? pageRow({ id: t.rulesId, title: 'Правила базы' }, 'по ним Gemini разбирает «Входящие»', '📐') : '') +
@@ -652,38 +660,277 @@
 
   // ───────────────────────────── Экран «Видео» ─────────────────────────────
 
-  function videoRow(v) {
-    return row({ act: 'video', data: { id: v.id }, icon: v.videoId ? '▶️' : '📰', title: v.title, sub: (v.videoId ? 'Видео' : 'Клиппинг') + ' · ' + when(v.created) });
+  // У каждого видео — карточка в разделе «Видео» на Диске: конспект с таймкодами, что применить, вопросы.
+  // Статус, тип, темы и канал приходят из свойств файла, поэтому фильтры работают без открытия документов.
+
+  const V_STATUS = { new: 'Не смотрел', watched: 'Посмотрел', applied: 'Применил' };
+  const V_TYPE = { learn: ['📚', 'Обучение'], inspire: ['✨', 'Вдохновение'], fun: ['🎬', 'Развлечение'] };
+  S.vf = Object.assign({ status: 'all', type: 'all', topic: '', channel: '' }, LS.get('vf', {}), { q: '' });
+  const saveVf = () => LS.set('vf', { status: S.vf.status, type: S.vf.type, topic: S.vf.topic, channel: S.vf.channel });
+
+  const videos = () => ((S.tree && S.tree.videos) || []).filter(v => v.videoId);
+  const findVideo = id => videos().find(v => v.id === id) || null;
+  const ready = v => !v.state || v.state === 'done';
+  const persistTree = () => idb.set('tree', { tree: S.tree, at: S.treeAt, demo: !!S.settings.demo });
+  function fmtDur(sec) {
+    sec = Math.round(sec);
+    const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+  }
+  const tsToSec = t => String(t).split(':').reduce((a, x) => a * 60 + +x, 0);
+
+  function clipRow(c) {
+    return row({ act: 'page', data: { id: c.id, title: c.title }, icon: '📰', title: c.title, sub: 'Клиппинг · ' + when(c.created) });
   }
 
-  function videoCard(v, pending) {
-    const id = v.videoId || ytId(v.url);
-    return '<button class="video" data-act="' + (pending ? 'page' : 'video') + '" data-id="' + esc(v.id) + '" data-title="' + esc(v.title) + '">' +
-      '<span class="thumb">' + I.video + (id ? '<img src="' + thumb(id) + '" alt="" loading="lazy" onerror="this.remove()">' : '') +
-      (pending ? '<span class="tag">ждёт разбора</span>' : '') + '</span>' +
-      '<span class="vb"><span class="vt">' + esc(v.title.replace(/^Видео\s+—\s+/, '')) + '</span><span class="vs">' + esc(when(v.created)) + '</span></span></button>';
+  function videoRow(v) {
+    return row({ act: 'video', data: { id: v.id }, icon: '▶️', title: v.title, sub: [v.channel, V_STATUS[v.status] || ''].filter(Boolean).join(' · ') });
+  }
+
+  function videoTile(v) {
+    const badge = !ready(v)
+      ? '<span class="tag">' + (v.state === 'error' ? '⚠️ ошибка' : '⏳ готовится') + '</span>'
+      : v.status === 'applied' ? '<span class="tag ok">★ применил</span>'
+        : v.status === 'watched' ? '<span class="tag ok">✓ посмотрел</span>' : '';
+    const sub = [v.type && V_TYPE[v.type] ? V_TYPE[v.type][0] : '', v.channel, when(v.created)].filter(Boolean).join(' · ');
+    return '<button class="video" data-act="video" data-id="' + esc(v.id) + '">' +
+      '<span class="thumb">' + I.video + '<img src="' + thumb(v.videoId) + '" alt="" loading="lazy" onerror="this.remove()">' + badge +
+      (v.seconds ? '<span class="dur">' + fmtDur(v.seconds) + '</span>' : '') + '</span>' +
+      '<span class="vb"><span class="vt">' + esc(v.title) + '</span><span class="vs">' + esc(sub) + '</span></span></button>';
+  }
+
+  function pendingTile(i) {
+    return '<button class="video" data-act="page" data-id="' + esc(i.id) + '" data-title="' + esc(i.title) + '">' +
+      '<span class="thumb">' + I.video + '<img src="' + thumb(ytId(i.url)) + '" alt="" loading="lazy" onerror="this.remove()">' +
+      '<span class="tag">ждёт разбора</span></span>' +
+      '<span class="vb"><span class="vt">' + esc(i.title.replace(/^Видео\s+—\s+/, '')) + '</span><span class="vs">' + esc(when(i.created)) + '</span></span></button>';
+  }
+
+  function filterVideos() {
+    const f = S.vf;
+    const words = norm(f.q).split(/\s+/).filter(Boolean);
+    return videos().filter(v =>
+      (f.status === 'all' || v.status === f.status) &&
+      (f.type === 'all' || v.type === f.type) &&
+      (!f.topic || (v.topics || []).indexOf(f.topic) >= 0) &&
+      (!f.channel || v.channel === f.channel) &&
+      words.every(w => norm(v.title + ' ' + (v.channel || '') + ' ' + (v.topics || []).join(' ')).includes(w)));
+  }
+
+  function videosBody() {
+    if (!videos().length) {
+      return '<div class="card empty">Пока нет видео. Вставьте ссылку на YouTube на экране «Записать» — через пару минут здесь появится карточка: конспект с таймкодами, что применить и вопросы для самопроверки.</div>';
+    }
+    const list = filterVideos();
+    if (!list.length) return '<div class="card empty">Под фильтр ничего не подходит.<br><br><button class="btn small" data-act="vf-reset">Сбросить фильтры</button></div>';
+    return '<div class="videos">' + list.map(videoTile).join('') + '</div>';
   }
 
   function ROOTS_videos() {
     if (!configured()) return { title: 'Видео', html: onboardingHtml() };
     if (!S.tree) return { title: 'Видео', html: loadingHtml() };
     const t = S.tree;
-    const pending = t.inbox.filter(i => ytId(i.url) && i.mime === 'application/vnd.google-apps.document');
-    const vids = t.videos.filter(v => v.videoId);
-    const other = t.videos.filter(v => !v.videoId);
+    const all = videos();
+    const f = S.vf;
+    const have = new Set(all.map(v => v.videoId));
+    const pending = t.inbox.filter(i => ytId(i.url) && !have.has(ytId(i.url)) && i.mime === 'application/vnd.google-apps.document');
+    const clips = t.clips || [];
+    const uniq = arr => Array.from(new Set(arr)).filter(Boolean).sort((a, b) => a.localeCompare(b, 'ru'));
+    const topics = uniq([].concat(...all.map(v => v.topics || [])));
+    const channels = uniq(all.map(v => v.channel));
+    const count = s => all.filter(v => s === 'all' || v.status === s).length;
+
     let h = '';
-    if (pending.length) h += '<h2 class="section">Новые, ещё не разобраны</h2><div class="videos">' + pending.map(v => videoCard(v, true)).join('') + '</div>';
-    h += '<h2 class="section">Видео</h2>' + (vids.length
-      ? '<div class="videos">' + vids.map(v => videoCard(v)).join('') + '</div>'
-      : '<div class="card empty">Пока нет. Вставьте ссылку на YouTube на экране «Записать» — ревизия сохранит транскрипт и разложит знания по темам.</div>');
-    if (other.length) h += '<h2 class="section">Статьи и другое</h2><ul class="list">' + other.map(videoRow).join('') + '</ul>';
-    return { title: 'Видео', html: h };
+    if (all.length) {
+      h += '<label class="search">' + I.search + '<input id="vq" type="search" placeholder="Поиск по видео, каналам, темам" autocomplete="off" value="' + esc(f.q) + '"></label>';
+      h += '<div class="seg">' + ['all', 'new', 'watched', 'applied'].map(s =>
+        '<button data-act="vf" data-k="status" data-v="' + s + '"' + (f.status === s ? ' class="on"' : '') + '>' +
+        (s === 'all' ? 'Все' : V_STATUS[s]) + ' <span>' + count(s) + '</span></button>').join('') + '</div>';
+      h += '<div class="chips filters">' + ['all', 'learn', 'inspire', 'fun'].map(k =>
+        '<button class="chip' + (f.type === k ? ' on' : '') + '" data-act="vf" data-k="type" data-v="' + k + '">' +
+        (k === 'all' ? 'Любой тип' : V_TYPE[k].join(' ')) + '</button>').join('') +
+        (topics.length ? '<select class="chip' + (f.topic ? ' on' : '') + '" id="vTopic" aria-label="Тема"><option value="">Все темы</option>' +
+          topics.map(x => '<option value="' + esc(x) + '"' + (f.topic === x ? ' selected' : '') + '>' + esc(x) + '</option>').join('') + '</select>' : '') +
+        (channels.length > 1 ? '<select class="chip' + (f.channel ? ' on' : '') + '" id="vChannel" aria-label="Канал"><option value="">Все каналы</option>' +
+          channels.map(x => '<option value="' + esc(x) + '"' + (f.channel === x ? ' selected' : '') + '>' + esc(x) + '</option>').join('') + '</select>' : '') +
+        '</div>';
+    }
+    if (pending.length) h += '<h2 class="section">Ждут карточки</h2><div class="videos">' + pending.map(pendingTile).join('') + '</div><div style="height:14px"></div>';
+    h += '<div id="vBody">' + videosBody() + '</div>';
+    if (clips.length) h += '<h2 class="section">Статьи и другое</h2><ul class="list">' + clips.map(clipRow).join('') + '</ul>';
+    return {
+      title: 'Видео',
+      html: h,
+      after() {
+        const q = $('#vq');
+        if (q) q.addEventListener('input', e => { S.vf.q = e.target.value; $('#vBody').innerHTML = videosBody(); });
+        const sel = (id, key) => { const el = $(id); if (el) el.addEventListener('change', e => { S.vf[key] = e.target.value; saveVf(); rerenderKeepScroll(); }); };
+        sel('#vTopic', 'topic');
+        sel('#vChannel', 'channel');
+      },
+    };
+  }
+
+  function rerenderKeepScroll() {
+    const y = window.scrollY;
+    render();
+    window.scrollTo(0, y);
   }
 
   function openVideo(id) {
-    const v = S.tree && S.tree.videos.find(x => x.id === id);
-    if (!v) return openPage(id);
-    openPage(v.id, v.title, { videoId: v.videoId, url: v.url, noteId: v.noteId });
+    const v = findVideo(id);
+    push({ type: 'video', id, title: v ? v.title : '' });
+  }
+
+  function playerHtml(vid) {
+    if (!vid) return '';
+    return '<div class="player" id="player"><img src="https://i.ytimg.com/vi/' + vid + '/hqdefault.jpg" alt="">' +
+      '<button class="play" data-act="yt-play" data-vid="' + vid + '" aria-label="Смотреть">' + I.play + '</button></div>';
+  }
+
+  /** Плеер внутри приложения; sec — перейти к моменту (таймкоды в конспекте и транскрипте). */
+  function playAt(vid, sec) {
+    const p = $('#player');
+    if (!p) return;
+    p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + encodeURIComponent(vid) +
+      '?autoplay=1&playsinline=1&rel=0' + (sec ? '&start=' + Math.floor(sec) : '') +
+      '" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen title="Видео"></iframe>';
+    if (sec != null) {
+      const y = p.getBoundingClientRect().top + window.scrollY - $('.top').offsetHeight - 8;
+      if (y < window.scrollY) window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+    }
+  }
+
+  /** «[12:34]» и «**0:02**» в тексте → ссылки на нужный момент видео. */
+  function linkTimestamps(md, vid) {
+    const link = t => '[' + t + '](https://www.youtube.com/watch?v=' + vid + '&t=' + tsToSec(t) + 's)';
+    return String(md)
+      .replace(/\\?\[(\d{1,2}:\d{2}(?::\d{2})?)\\?\](?!\()/g, (m, t) => link(t))
+      .replace(/\*\*(\d{1,2}:\d{2}(?::\d{2})?)\*\*/g, (m, t) => link(t));
+  }
+
+  function VIEWS_video(v) {
+    const c = findVideo(v.id) || { id: v.id, title: v.title || 'Видео', videoId: v.videoId || '', status: 'new', state: 'done', done: [] };
+    Object.assign(v, { videoId: c.videoId, url: c.url || (c.videoId ? 'https://www.youtube.com/watch?v=' + c.videoId : ''), lastState: c.state, title: c.title });
+    let h = playerHtml(c.videoId);
+    const meta = [c.channel, c.seconds ? fmtDur(c.seconds) : '', c.type && V_TYPE[c.type] ? V_TYPE[c.type].join(' ') : '', (c.topics || []).join(', ')].filter(Boolean);
+    if (meta.length) h += '<p class="small muted vmeta">' + esc(meta.join(' · ')) + '</p>';
+    h += '<div class="seg" id="vStatus">' + Object.keys(V_STATUS).map(s =>
+      '<button data-act="vstatus" data-v="' + s + '"' + (c.status === s ? ' class="on"' : '') + '>' + V_STATUS[s] + '</button>').join('') + '</div>';
+    if (!ready(c)) {
+      h += '<div class="card pad notice">' + (c.state === 'error'
+        ? '<b>⚠️ Карточку сделать не удалось</b><div class="small muted">' + esc(c.error || '') + '</div><div style="margin-top:8px"><button class="btn small" data-act="vretry">Попробовать ещё раз</button></div>'
+        : '<b>⏳ Карточка готовится</b><div class="small muted">Сейчас: ' + esc(c.stage || 'в очереди') + '. Обычно 1–3 минуты, длинные видео — дольше. Обновится само.</div>') + '</div>';
+    }
+    h += '<div class="page-meta">' +
+      (c.transcriptId ? '<button class="chip" data-act="page" data-id="' + esc(c.transcriptId) + '" data-title="Транскрипт" data-video="' + esc(c.videoId) + '">Транскрипт</button>' : '') +
+      '<button class="chip" data-act="ask-page" data-id="' + esc(c.id) + '">Спросить AI</button>' +
+      (v.url ? '<a class="chip" href="' + esc(v.url) + '" target="_blank" rel="noopener">YouTube</a>' : '') +
+      (String(c.id).startsWith('demo') ? '' : '<a class="chip" href="' + docUrl(c.id) + '" target="_blank" rel="noopener">Google Docs</a>') +
+      (ready(c) ? '<button class="chip" data-act="vretry">Пересобрать</button>' : '') +
+      '</div>' +
+      '<article class="card doc" id="doc"><div class="skeleton" style="width:70%"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton" style="width:50%"></div></article>' +
+      '<p class="small muted center" id="docMeta"></p>';
+    return { title: c.title, html: h, after: () => loadPage(v) };
+  }
+
+  function applyChecks(v) {
+    const c = findVideo(v.id);
+    const done = new Set((c && c.done) || []);
+    $$('#doc [data-check]').forEach(el => setCheck(el, done.has(+el.dataset.check)));
+  }
+
+  function setCheck(el, on) {
+    el.textContent = on ? '☑' : '☐';
+    el.classList.add('tap');
+    el.setAttribute('role', 'checkbox');
+    el.setAttribute('aria-checked', String(on));
+    const li = el.closest('li');
+    if (li) li.classList.toggle('done', on);
+  }
+
+  async function toggleCheck(el) {
+    const v = top();
+    const c = v && findVideo(v.id);
+    if (!c) return;
+    const i = +el.dataset.check;
+    const set = new Set(c.done || []);
+    if (set.has(i)) set.delete(i); else set.add(i);
+    c.done = Array.from(set).sort((a, b) => a - b);
+    setCheck(el, set.has(i));
+    const total = $$('#doc [data-check]').length;
+    const allDone = total && set.size === total && c.status !== 'applied';
+    try {
+      const r = await api('videoSet', Object.assign({ id: c.id, done: c.done.join(',') }, allDone ? { status: 'applied' } : {}));
+      Object.assign(c, r.video);
+      persistTree();
+      if (allDone) {
+        $$('#vStatus button').forEach(b => b.classList.toggle('on', b.dataset.v === 'applied'));
+        toast('Все пункты сделаны — отметил видео как «Применил»');
+      }
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  async function setVideoStatus(s) {
+    const v = top();
+    const c = v && findVideo(v.id);
+    if (!c || c.status === s) return;
+    const prev = c.status;
+    const mark = x => $$('#vStatus button').forEach(b => b.classList.toggle('on', b.dataset.v === x));
+    c.status = s;
+    mark(s);
+    try {
+      const r = await api('videoSet', { id: c.id, status: s });
+      Object.assign(c, r.video);
+      persistTree();
+      toast('Отмечено: ' + V_STATUS[s]);
+    } catch (e) {
+      c.status = prev;
+      mark(prev);
+      toast(e.message);
+    }
+  }
+
+  async function retryVideo() {
+    const v = top();
+    const c = v && findVideo(v.id);
+    if (!c) return;
+    if (ready(c) && !confirm('Пересобрать карточку заново? Gemini ещё раз сделает конспект, отметки «Что применить» сбросятся.')) return;
+    try {
+      const r = await api('videoRetry', { id: c.id });
+      Object.assign(c, r.video);
+      persistTree();
+      render();
+      watchProcessing();
+      toast('Карточка пересобирается — обычно 1–3 минуты');
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  // Пока какие-то карточки готовятся, база обновляется каждые 40 секунд
+  let procTimer = 0;
+  function watchProcessing() {
+    clearTimeout(procTimer);
+    if (!videos().some(v => !ready(v) && v.state !== 'error')) return;
+    procTimer = setTimeout(() => {
+      if (document.visibilityState === 'visible') refreshTree(true);
+      else watchProcessing();
+    }, 40000);
+  }
+
+  async function migrateVideos() {
+    toast('Собираю карточки для старых видео…', 5000);
+    try {
+      const r = await api('migrateVideos', {}, 300000);
+      const made = (r.log || []).filter(x => /^Карточка:/.test(x)).length;
+      toast(made ? 'Заведено карточек: ' + made + '. Конспекты появятся в течение нескольких минут.' : 'Новых видео для карточек не нашлось', 5000);
+      refreshTree(true);
+    } catch (e) {
+      toast(e.message, 5000);
+    }
   }
 
   // ───────────────────────────── Страница ─────────────────────────────
@@ -691,7 +938,7 @@
   function findKnown(id) {
     if (!S.tree) return null;
     const t = S.tree;
-    const pools = [].concat(...t.topics.map(x => x.pages), t.general, t.thoughts, t.notes, t.inbox, t.videos, t.lastReport ? [t.lastReport] : []);
+    const pools = [].concat(...t.topics.map(x => x.pages), t.general, t.thoughts, t.notes, t.inbox, t.videos, t.clips || [], t.lastReport ? [t.lastReport] : []);
     return pools.find(p => p.id === id) || null;
   }
 
@@ -699,10 +946,7 @@
   function VIEWS_page(v) {
     const vid = v.videoId || ytId(v.url);
     let h = '';
-    if (vid) {
-      h += '<div class="player" id="player"><img src="https://i.ytimg.com/vi/' + vid + '/hqdefault.jpg" alt="">' +
-        '<button class="play" data-act="yt-play" data-vid="' + vid + '" aria-label="Смотреть">' + I.play + '</button></div>';
-    }
+    if (vid) { v.videoId = vid; h += playerHtml(vid); }
     h += '<div class="page-meta">' +
       (v.url ? '<a class="chip" href="' + esc(v.url) + '" target="_blank" rel="noopener">' + (vid ? 'Открыть в YouTube' : 'Источник') + '</a>' : '') +
       (v.noteId && v.noteId !== v.id ? '<button class="chip" data-act="page" data-id="' + esc(v.noteId) + '" data-title="Мой комментарий">Мой комментарий</button>' : '') +
@@ -735,7 +979,12 @@
     if (top() !== v) return;
     if (!v.title && p.title) { v.title = p.title; $('#title').textContent = p.title; }
     if (!v.url && p.url && p.url !== '-' && /^https?:/.test(p.url)) { v.url = p.url; if (ytId(p.url) && !v.videoId) { v.videoId = ytId(p.url); render(); return; } }
-    $('#doc').innerHTML = MD.render(MD.stripTitle(p.markdown, p.title)) || '<p class="muted">Пустая страница</p>';
+    let md = MD.stripTitle(p.markdown, p.title);
+    // канал, длительность, тип и темы карточки уже показаны над плеером — в тексте их не дублируем
+    if (v.type === 'video' && /^#{1,3}\s/m.test(md)) md = md.replace(/^[\s\S]*?(?=^#{1,3}\s)/m, '');
+    if (v.videoId) md = linkTimestamps(md, v.videoId);
+    $('#doc').innerHTML = MD.render(md) || '<p class="muted">Пустая страница</p>';
+    if (v.type === 'video') applyChecks(v);
     showMeta(v, p, fromCache);
   }
 
@@ -924,6 +1173,7 @@
         '<ul class="list">' +
           row({ act: 'revise', icon: '🧹', title: 'Разобрать «Входящие» сейчас', sub: 'не дожидаясь ревизии в 9:00' }) +
           row({ act: 'refresh', icon: '🔄', title: 'Обновить базу с Диска' }) +
+          row({ act: 'migrate', icon: '🎞️', title: 'Сделать карточки для старых видео', sub: 'для роликов, сохранённых до карточек; повторно не дублирует' }) +
           row({ act: 'clear-cache', icon: '🗑️', title: 'Очистить сохранённые страницы', sub: 'очередь отправки не трогается', chev: false }) +
         '</ul>' +
 
@@ -998,13 +1248,23 @@
   // ───────────────────────────── События ─────────────────────────────
 
   const ROOTS = { capture: ROOTS_capture, base: ROOTS_base, videos: ROOTS_videos, chat: ROOTS_chat };
-  const VIEWS = { page: VIEWS_page, topic: VIEWS_topic, list: VIEWS_list, settings: VIEWS_settings };
+  const VIEWS = { page: VIEWS_page, video: VIEWS_video, topic: VIEWS_topic, list: VIEWS_list, settings: VIEWS_settings };
 
   document.addEventListener('click', e => {
     const tab = e.target.closest('.tab');
     if (tab) { switchTab(tab.dataset.tab); return; }
     const docLink = e.target.closest('a[data-doc]');
     if (docLink) { e.preventDefault(); openPage(docLink.dataset.doc, (findKnown(docLink.dataset.doc) || {}).title || docLink.textContent.trim()); return; }
+    // таймкод этого же видео — перемотать плеер, а не уходить на YouTube
+    const a = e.target.closest('a[href]');
+    const cur = top();
+    if (a && cur && cur.videoId && ytId(a.href) === cur.videoId) {
+      let t = null;
+      try { t = new URL(a.href).searchParams.get('t'); } catch (err) {}
+      if (t != null) { e.preventDefault(); playAt(cur.videoId, parseInt(t, 10) || 0); return; }
+    }
+    const chk = e.target.closest('#doc [data-check]');
+    if (chk && cur && cur.type === 'video') { toggleCheck(chk); return; }
     const el = e.target.closest('[data-act]');
     if (!el) return;
     const d = el.dataset;
@@ -1023,7 +1283,7 @@
         saveOutbox();
         renderRecent();
         break;
-      case 'page': openPage(d.id, d.title || (findKnown(d.id) || {}).title); break;
+      case 'page': openPage(d.id, d.title || (findKnown(d.id) || {}).title, d.video ? { videoId: d.video } : null); break;
       case 'video': openVideo(d.id); break;
       case 'topic': push({ type: 'topic', name: d.name }); break;
       case 'list': push({ type: 'list', kind: d.kind }); break;
@@ -1036,11 +1296,20 @@
       case 'clear-cache':
         idb.clear().then(() => { saveOutbox(); idb.set('tree', { tree: S.tree, at: S.treeAt }); toast('Сохранённые страницы удалены'); });
         break;
-      case 'yt-play': {
-        const p = $('#player');
-        if (p) p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + encodeURIComponent(d.vid) + '?autoplay=1&playsinline=1&rel=0" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen title="Видео"></iframe>';
+      case 'yt-play': playAt(d.vid, null); break;
+      case 'vf':
+        S.vf[d.k] = d.v;
+        saveVf();
+        rerenderKeepScroll();
         break;
-      }
+      case 'vf-reset':
+        Object.assign(S.vf, { status: 'all', type: 'all', topic: '', channel: '', q: '' });
+        saveVf();
+        render();
+        break;
+      case 'vstatus': setVideoStatus(d.v); break;
+      case 'vretry': retryVideo(); break;
+      case 'migrate': migrateVideos(); break;
       case 'ask': ask(d.q); break;
       case 'ask-page': {
         const v = top();
@@ -1101,7 +1370,8 @@
     } else {
       setSync('', 'Не подключено');
     }
-    if ('serviceWorker' in navigator && /^https?:/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
+    // на localhost офлайн-кэш не нужен: при разработке он показывал бы старую версию файлов
+    if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   })();
 })();

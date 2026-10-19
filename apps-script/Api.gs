@@ -3,7 +3,8 @@
  *
  * Файл добавляется в тот же проект Apps Script, что и Code.gs («База знаний — ревизия»), и пользуется его
  * функциями: CONFIG, root_, sub_, importMarkdown_, exportMarkdown_, callGemini_, callGeminiRaw_,
- * youtubeInfo_, readRules_, cleanTitle_, fmtTime_, decodeEntities_, YT_RE, DOC_MIME, continueRevision.
+ * youtubeInfo_, readRules_, cleanTitle_, fmtTime_, decodeEntities_, YT_RE, DOC_MIME, continueRevision,
+ * а карточки видео — из Video.gs.
  * Ключ Gemini тот же — свойство скрипта GEMINI_API_KEY.
  *
  * Настройка (один раз):
@@ -35,6 +36,9 @@ const API_ = {
   voice: apiVoice_,
   chat: apiChat_,
   revise: apiRevise_,
+  videoSet: apiVideoSet_,
+  videoRetry: apiVideoRetry_,
+  migrateVideos: apiMigrateVideos_,
 };
 
 // ───────────────────────────── Запуск вручную ─────────────────────────────
@@ -60,7 +64,7 @@ function resetAppToken() {
 /** Проверка без телефона: печатает в журнал, что увидит приложение. */
 function testApi() {
   const t = apiTree_().tree;
-  Logger.log('Тем: ' + t.topics.length + ', мыслей: ' + t.thoughts.length + ', видео: ' + t.videos.length +
+  Logger.log('Тем: ' + t.topics.length + ', мыслей: ' + t.thoughts.length + ', карточек видео: ' + t.videos.length +
     ', во «Входящих»: ' + t.inbox.length);
   t.topics.forEach(x => Logger.log('  ' + x.name + ' — страниц: ' + x.pages.length));
 }
@@ -163,7 +167,8 @@ function apiTree_() {
       general: general.sort(byModified_),
       thoughts,
       thoughtsIndex,
-      videos: clippings_(sub_(sources, APP.CLIPPINGS)),
+      videos: listCards_(),
+      clips: otherClips_(sub_(sources, APP.CLIPPINGS)),
       notes: notes.slice(0, APP.RECENT_NOTES),
       notesTotal: notes.length,
       inbox,
@@ -199,10 +204,11 @@ function apiAdd_(req) {
   const url = (text.match(/https?:\/\/[^\s<>"«»]+/) || [''])[0].replace(/[.,;:!?)]+$/, '');
   const rest = url ? text.replace(url, '').trim() : text;
 
-  let title, md;
+  let title, md, videoInfo = null;
   if (url && rest.length < 600) {
     const yt = YT_RE.test(url);
     const info = yt ? youtubeInfo_(url) : pageInfo_(url);
+    if (yt) videoInfo = info;
     title = cleanTitle_((yt ? 'Видео — ' : 'Ссылка — ') + info.title);
     md = '# ' + info.title + '\n\n- **Ссылка:** ' + url +
       (info.author ? '\n- **Автор:** ' + info.author : '') +
@@ -214,8 +220,14 @@ function apiAdd_(req) {
   }
   const id = importMarkdown_(title, md, sub_(root, CONFIG.INBOX));
   if (url) DriveApp.getFileById(id).setDescription(url);
+  // Видео: карточка (транскрипт + конспект) делается сразу в фоне, не дожидаясь утренней ревизии
+  let cardId = null;
+  if (url && ytId_(url)) {
+    cardId = ensureVideo_(url, { comment: rest, info: videoInfo }).id;
+    scheduleVideoQueue_();
+  }
   const scheduled = req.revise ? scheduleRevision_() : false;
-  return { item: { id, title, url, kind: url ? 'link' : 'note' }, scheduled };
+  return { item: { id, title, url, kind: url ? 'link' : 'note', cardId }, scheduled };
 }
 
 const VOICE_SYSTEM = [
@@ -345,6 +357,46 @@ function apiChat_(req) {
   return { answer: answer.trim(), sources: pages.map(p => ({ title: p.title, id: p.id })) };
 }
 
+/** Статус просмотра и отмеченные пункты «Что применить». */
+function apiVideoSet_(req) {
+  const props = {};
+  if (req.status != null) {
+    if (VIDEO_STATUSES.indexOf(req.status) < 0) throw new Error('Неизвестный статус: ' + req.status);
+    props.status = req.status;
+  }
+  if (req.done != null) props.done = String(req.done).split(',').filter(x => /^\d+$/.test(x)).join(',') || null;
+  setCardProps_(String(req.id), props);
+  return { video: findCardById_(String(req.id)) };
+}
+
+/** Пересобрать карточку: заново конспект, а если транскрипта не было — и транскрипт. */
+function apiVideoRetry_(req) {
+  const card = findCardById_(String(req.id));
+  let real = false;
+  if (card.transcriptId) {
+    try { real = isRealTranscript_(DocumentApp.openById(card.transcriptId).getBody().getText()); } catch (e) {}
+    if (!real) {
+      try {
+        DriveApp.getFileById(card.transcriptId).moveTo(sub_(sub_(root_(), CONFIG.SERVICE), VIDEO.ARCHIVE));
+      } catch (e) {}
+    }
+  }
+  if (!real) PropertiesService.getScriptProperties().deleteProperty('TR_' + card.videoId);
+  setCardProps_(card.id, {
+    state: real ? 'summarizing' : 'queued',
+    stage: real ? 'конспект' : 'в очереди',
+    transcriptId: real ? card.transcriptId : null,
+    tries: null,
+    err: null,
+  });
+  scheduleVideoQueue_();
+  return { video: findCardById_(card.id) };
+}
+
+function apiMigrateVideos_() {
+  return { log: migrateVideos() };
+}
+
 function apiRevise_() {
   const scheduled = scheduleRevision_();
   return { scheduled, inbox: inboxCount_() };
@@ -367,13 +419,14 @@ function inboxCount_() {
 }
 
 /**
- * Клиппинги для экрана «Видео». Транскрипт и исходная заметка со ссылкой на одно видео склеиваются в одну карточку.
- * Ссылка на видео запоминается в описании файла, чтобы не открывать документ при каждом запросе.
+ * Статьи и прочие клиппинги (не YouTube) для экрана «Видео». У видео теперь свои карточки в разделе «Видео».
+ * Ссылка запоминается в описании файла, чтобы не открывать документ при каждом запросе.
  */
-function clippings_(folder) {
-  const items = [];
+function otherClips_(folder) {
+  const out = [];
   let lookups = 0;
   walkDocs_(folder, f => {
+    if (/^Транскрипт\s+—/.test(f.getName())) return;
     let url = f.getDescription() || '';
     if (!url && lookups < APP.VIDEO_LOOKUPS_PER_CALL) {
       lookups++;
@@ -382,34 +435,13 @@ function clippings_(folder) {
       f.setDescription(url || '-');
     }
     if (url === '-') url = '';
-    items.push(Object.assign(docInfo_(f), { url, videoId: ytId_(url) }));
+    if (ytId_(url)) return;
+    out.push(Object.assign(docInfo_(f), { url }));
   });
-
-  const byVideo = {};
-  const out = [];
-  items.sort(byCreated_).forEach(x => {
-    const transcript = /^Транскрипт\s+—/.test(x.title);
-    const key = x.videoId || x.id;
-    const prev = byVideo[key];
-    if (!prev) {
-      const card = Object.assign({}, x, { noteId: transcript ? null : x.id });
-      byVideo[key] = card;
-      out.push(card);
-      return;
-    }
-    if (transcript) {
-      // карточка ведёт на транскрипт, заметка со ссылкой остаётся «моим комментарием»
-      prev.noteId = prev.noteId || prev.id;
-      Object.assign(prev, { id: x.id, title: x.title, modified: x.modified });
-    } else {
-      prev.noteId = x.id;
-    }
-  });
-  out.forEach(c => { c.title = c.title.replace(/^(Транскрипт|Видео|Ссылка)\s+—\s+/, ''); });
-  return out;
+  return out.sort(byCreated_);
 }
 
-/** Страницы, по которым ищет чат: знания, мысли, транскрипты и оригиналы заметок. */
+/** Страницы, по которым ищет чат: карточки видео, знания, мысли, транскрипты и оригиналы заметок. */
 function chatIndex_(root) {
   const out = [];
   const add = (folder, base) => walkDocs_(folder, (f, path) => {
@@ -417,6 +449,7 @@ function chatIndex_(root) {
     p.path = base + (path ? '/' + path : '');
     out.push(p);
   });
+  add(sub_(root, VIDEO.FOLDER), VIDEO.FOLDER);
   add(sub_(root, CONFIG.KNOWLEDGE), CONFIG.KNOWLEDGE);
   add(sub_(root, CONFIG.THOUGHTS), CONFIG.THOUGHTS);
   const sources = sub_(root, CONFIG.SOURCES);

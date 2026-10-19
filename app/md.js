@@ -53,7 +53,14 @@
     return row.replace(/\\\|/g, '\u0001').split('|').map(c => c.replace(/\u0001/g, '\\|').trim());
   }
 
+  // Чекбоксы нумеруются по порядку в документе — по номеру приложение помнит, какие пункты отмечены.
+  let checkN = 0;
   function render(src) {
+    checkN = 0;
+    return blocks(src);
+  }
+
+  function blocks(src) {
     src = String(src || '').replace(/\r\n?/g, '\n');
     const refs = {};
     src = src.replace(/^\[([^\]]+)\]:\s*<?(\S+?)>?(?:\s+"[^"]*")?\s*$/gm, (m, k, u) => { refs[k.toLowerCase()] = u; return ''; });
@@ -94,7 +101,7 @@
       if (/^>/.test(l)) {
         const buf = [];
         while (i < lines.length && /^>/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, ''));
-        out.push('<blockquote>' + render(buf.join('\n')) + '</blockquote>');
+        out.push('<blockquote>' + blocks(buf.join('\n')) + '</blockquote>');
         continue;
       }
       if (LIST_RE.test(l)) {
@@ -126,8 +133,10 @@
           } else {
             html += '</li><li>';
           }
-          const box = it.text.match(/^\[([ xX])\]\s+(.*)$/);
-          html += box ? '<span class="check">' + (box[1] === ' ' ? '☐' : '☑') + '</span> ' + inline(box[2], refs) : inline(it.text, refs);
+          const box = it.text.match(/^\\?\[([ xX])\\?\]\s+(.*)$/);
+          html += box
+            ? '<span class="check" data-check="' + (checkN++) + '">' + (box[1] === ' ' ? '☐' : '☑') + '</span> ' + inline(box[2], refs)
+            : inline(it.text, refs);
         }
         while (stack.length) html += '</li></' + stack.pop().tag + '>';
         out.push(html);

@@ -293,6 +293,39 @@ h2.section:first-child { margin-top: 4px; }
 .video .vt { font-size: 14.5px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .video .vs { font-size: 12.5px; color: var(--text-3); margin-top: 3px; }
 
+.video .tag.ok { background: rgba(47, 158, 99, 0.88); }
+.video .dur { position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 6px; background: rgba(0,0,0,.72); color: #fff; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+.seg {
+  display: flex; gap: 2px; padding: 2px; margin: 10px 0; border-radius: 11px; background: var(--surface-2);
+  border: 0.5px solid var(--line);
+}
+.seg button {
+  flex: 1; min-height: 34px; border: 0; border-radius: 9px; background: none; color: var(--text-2);
+  font-size: 13.5px; font-weight: 500; padding: 0 4px; white-space: nowrap; min-width: 0;
+}
+@media (max-width: 380px) { .seg button { font-size: 12.5px; } .seg button span { font-size: 11.5px; } }
+.seg button span { color: var(--text-3); font-size: 12.5px; font-weight: 400; }
+.seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.chips.filters { flex-wrap: nowrap; overflow-x: auto; margin: 0 -16px 12px; padding: 0 16px 2px; scrollbar-width: none; }
+.chips.filters::-webkit-scrollbar { display: none; }
+.chips.filters .chip { flex: none; }
+.chip.on { background: var(--accent); color: #fff; }
+select.chip { appearance: none; -webkit-appearance: none; border: 0; padding-right: 26px; max-width: 60vw;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
+select.chip:not(.on) { background-color: var(--surface-2); }
+.vmeta { margin: 0 4px 2px; }
+.notice { margin: 10px 0; line-height: 1.4; }
+.notice .small { margin-top: 2px; }
+.doc a[href*="youtube.com/watch"][href*="t="] {
+  display: inline-block; padding: 0 6px; margin-right: 2px; border-radius: 6px; background: var(--accent-soft);
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.6;
+}
+.doc .check.tap { cursor: pointer; font-size: 19px; line-height: 1; vertical-align: -2px; user-select: none; }
+.doc li.done { color: var(--text-3); text-decoration: line-through; }
+.doc li.done .check { text-decoration: none; }
+
 /* ───── чат ───── */
 .chat { display: flex; flex-direction: column; gap: 10px; padding-bottom: 76px; }
 .msg { max-width: 88%; padding: 10px 14px; border-radius: 18px; font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }

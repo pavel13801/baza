@@ -99,4 +99,24 @@ fs.writeFileSync(path.join(out, 'icon-192.png'), draw(192, 1));
 fs.writeFileSync(path.join(out, 'icon-512.png'), draw(512, 1));
 fs.writeFileSync(path.join(out, 'apple-touch-icon.png'), draw(180, 1));
 fs.writeFileSync(path.join(out, 'maskable-512.png'), draw(512, 0.8));
+
+// favicon.ico для Windows (ярлык на рабочем столе, вкладка): PNG-картинки внутри ICO
+const sizes = [16, 24, 32, 48, 64, 256];
+const pngs = sizes.map(s => draw(s, 1));
+const head = Buffer.alloc(6 + 16 * sizes.length);
+head.writeUInt16LE(0, 0);
+head.writeUInt16LE(1, 2);
+head.writeUInt16LE(sizes.length, 4);
+let offset = head.length;
+sizes.forEach((s, i) => {
+  const e = 6 + 16 * i;
+  head[e] = s >= 256 ? 0 : s;
+  head[e + 1] = s >= 256 ? 0 : s;
+  head.writeUInt16LE(1, e + 4);
+  head.writeUInt16LE(32, e + 6);
+  head.writeUInt32LE(pngs[i].length, e + 8);
+  head.writeUInt32LE(offset, e + 12);
+  offset += pngs[i].length;
+});
+fs.writeFileSync(path.join(out, 'favicon.ico'), Buffer.concat([head, ...pngs]));
 console.log('Иконки записаны в', out);
